@@ -75,10 +75,32 @@ Custom KPI/filter expressions go through pandas' own `eval`/`query`
 (restricted to referencing columns and arithmetic/comparison/boolean
 operations - not a general Python `eval`), plus a denylist on top for
 defense in depth (blocks `import`, `exec`, `__`, `os.`, `subprocess`,
-`lambda`, and similar tokens before the expression is ever parsed). A
-blocked or invalid expression shows an inline error on that KPI's card
-rather than crashing the app - tested against `__import__("os").system(...)`
-during development, which the denylist catches before it reaches pandas.
+`lambda`, and similar tokens before the expression is ever parsed) -
+tested against `__import__("os").system(...)` during development, which
+the denylist catches before it reaches pandas.
+
+## Adding a KPI with a mistyped column name
+
+Before a new KPI is ever added, `validate_custom_kpi()` resolves every
+column reference in the formula and filter against the file's real
+columns and actually computes it - a bad KPI never makes it onto the
+dashboard as a card that just says "error":
+
+- **Exact match** - used as-is.
+- **Close match** (wrong case, missing punctuation, a small typo - e.g.
+  `Total Incl VAT` for `Total incl. VAT`) - auto-corrected via
+  `difflib.get_close_matches`, and an info banner above the Custom KPIs
+  cards says what was matched to what, so the correction isn't silent.
+- **No good match, or valid columns but an invalid computation** (e.g. a
+  disallowed token, or a filter that doesn't parse) - nothing is added;
+  an inline error explaining exactly why appears under the Add KPI
+  button, in the same expander the user is already looking at.
+
+The one case that can still show "N/A" on an existing card: a custom KPI
+that computed fine gets orphaned because a *different* file was uploaded
+afterward without the column it depends on. That's a real state change,
+not a bad add, so it's surfaced with a reason in the card's caption
+rather than silently disappearing.
 
 ## Known limitations
 

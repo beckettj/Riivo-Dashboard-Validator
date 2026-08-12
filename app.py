@@ -19,6 +19,7 @@ Run with:
     streamlit run app.py
 """
 
+import difflib
 import re
 
 import numpy as np
@@ -89,6 +90,90 @@ def compute_custom_kpi(df, expr, agg, filter_expr=None):
     if agg != "% True":
         series = pd.to_numeric(series, errors="coerce")
     return AGG_FUNCS[agg](series)
+
+
+_KPI_KEYWORDS = {"and", "or", "not", "in", "true", "false", "none"}
+
+
+def resolve_column_refs(expr, columns, cutoff=0.72):
+    """Finds column references inside a formula/filter and reconciles them
+    against the file's real column names - correcting typos, wrong casing,
+    or missing punctuation (e.g. 'Total Incl VAT' -> 'Total incl. VAT')
+    instead of just letting them fail. Returns (resolved_expr, corrections,
+    unresolved): resolved_expr has every confidently-matched reference
+    backticked; corrections is [(typed, matched), ...] for anything that
+    needed fixing; unresolved is any phrase that looked like a column
+    reference but had no good match, so the caller can report it instead of
+    creating a KPI that just says 'error'."""
+    result = expr
+    columns = list(columns)
+
+    # Pass 1: exact matches, longest name first so substrings don't clash.
+    for col in sorted(columns, key=len, reverse=True):
+        if col in result:
+            already = re.search(r"`\s*" + re.escape(col) + r"\s*`", result)
+            if not already:
+                result = result.replace(col, f"`{col}`", 1)
+
+    # Pass 2: whatever's left outside backticks/quotes might be a mistyped
+    # column reference. Mask those spans (same length, so offsets still
+    # line up with `result`) before hunting for candidate phrases.
+    masked = re.sub(r"`[^`]*`", lambda m: "\0" * len(m.group()), result)
+    masked = re.sub(r"'[^']*'", lambda m: "\0" * len(m.group()), masked)
+    masked = re.sub(r'"[^"]*"', lambda m: "\0" * len(m.group()), masked)
+
+    corrections = []
+    unresolved = []
+    matches = list(re.finditer(r"[A-Za-z][A-Za-z0-9 ./%()]{1,}[A-Za-z0-9)]", masked))
+    # Process right-to-left so earlier match offsets stay valid as we splice.
+    for m in reversed(matches):
+        phrase = m.group().strip()
+        if not phrase or phrase.lower() in _KPI_KEYWORDS or not re.search(r"[A-Za-z]{2,}", phrase):
+            continue
+        ci_match = next((c for c in columns if c.lower() == phrase.lower()), None)
+        if ci_match:
+            result = result[: m.start()] + f"`{ci_match}`" + result[m.end():]
+            corrections.append((phrase, ci_match))
+            continue
+        best = difflib.get_close_matches(phrase, columns, n=1, cutoff=cutoff)
+        if best:
+            result = result[: m.start()] + f"`{best[0]}`" + result[m.end():]
+            corrections.append((phrase, best[0]))
+        else:
+            unresolved.append(phrase)
+
+    corrections.reverse()
+    unresolved.reverse()
+    return result, corrections, unresolved
+
+
+def validate_custom_kpi(df, expr, agg, filter_expr=None, cutoff=0.72):
+    """End-to-end check used before a custom KPI is ever added: resolves
+    (and auto-corrects) column references, then actually computes it
+    against this file. Only if this passes does the KPI get created -
+    otherwise the caller shows an inline error and nothing is added, so a
+    bad field name never turns into a permanent 'error' card."""
+    if not is_safe_expr(expr) or (filter_expr and not is_safe_expr(filter_expr)):
+        return False, expr, filter_expr, [], "Expression contains a disallowed token."
+
+    resolved_expr, corr_expr, unresolved_expr = resolve_column_refs(expr, df.columns, cutoff)
+    resolved_filter, corr_filter, unresolved_filter = (
+        resolve_column_refs(filter_expr, df.columns, cutoff) if filter_expr else (None, [], [])
+    )
+    corrections = corr_expr + corr_filter
+    unresolved = unresolved_expr + unresolved_filter
+    if unresolved:
+        names = ", ".join(f"'{u}'" for u in unresolved)
+        return False, resolved_expr, resolved_filter, corrections, (
+            f"Couldn't match {names} to any column in this file - check spelling."
+        )
+
+    try:
+        compute_custom_kpi(df, resolved_expr, agg, resolved_filter)
+    except Exception as e:
+        return False, resolved_expr, resolved_filter, corrections, str(e)
+
+    return True, resolved_expr, resolved_filter, corrections, None
 
 
 def fmt_value(value, kind):
@@ -261,6 +346,8 @@ status = reconcile.compute_status_breakdown(rows, years_filter)
 
 if "custom_kpis" not in st.session_state:
     st.session_state.custom_kpis = []
+if "kpi_feedback" not in st.session_state:
+    st.session_state.kpi_feedback = None
 
 st.title("Invoice Tools")
 st.caption(f"{uploaded.name}" + (f" - sheet '{sheet}'" if sheet else "") + f" - {total_rows} rows, {len(df.columns)} columns")
@@ -340,6 +427,10 @@ with tab_kpi:
 
     st.divider()
     st.subheader("Custom KPIs")
+    if st.session_state.kpi_feedback:
+        kind, msg = st.session_state.kpi_feedback
+        getattr(st, kind)(msg)
+        st.session_state.kpi_feedback = None
     if st.session_state.custom_kpis:
         custom_cols = st.columns(4)
         for i, cfg in enumerate(list(st.session_state.custom_kpis)):
@@ -349,8 +440,12 @@ with tab_kpi:
                     value = compute_custom_kpi(source_df, cfg["expr"], cfg["agg"], cfg.get("filter"))
                     st.metric(cfg["name"], fmt_value(value, cfg["format"]))
                 except Exception as e:
-                    st.metric(cfg["name"], "error")
-                    st.caption(str(e))
+                    # Only reachable if a *previously valid* KPI stops working
+                    # because a new file was uploaded without that column -
+                    # new KPIs are validated before they're ever added, so
+                    # this shouldn't happen for anything created just now.
+                    st.metric(cfg["name"], "N/A")
+                    st.caption(f"Not available in this file: {e}")
                 if st.button("Remove", key=f"remove_{i}_{cfg['name']}"):
                     st.session_state.custom_kpis.pop(i)
                     st.rerun()
@@ -360,7 +455,10 @@ with tab_kpi:
     with st.expander("Add a new KPI"):
         st.caption("Pick a column, or write a formula referencing column names (spaces/punctuation are "
                     "handled automatically - no need to type backticks). Example formula: "
-                    "`Total incl. VAT - Payment Received`. Optional filter, e.g. `Status Reason == 'Paid'`.")
+                    "`Total incl. VAT - Payment Received`. Optional filter, e.g. `Status Reason == 'Paid'`. "
+                    "A misspelled or slightly-off column name is matched to the closest real column "
+                    "automatically where possible; if nothing added shows up, check the error message above "
+                    "the cards - that's the actual reason it wasn't created.")
         new_name = st.text_input("Name", key="new_kpi_name")
         new_expr = st.text_input("Column or formula", key="new_kpi_expr")
         new_agg = st.selectbox("Aggregation", list(AGG_FUNCS.keys()), key="new_kpi_agg")
@@ -370,11 +468,20 @@ with tab_kpi:
             if not new_name or not new_expr:
                 st.error("Name and column/formula are required.")
             else:
-                st.session_state.custom_kpis.append({
-                    "name": new_name, "expr": new_expr, "agg": new_agg,
-                    "filter": new_filter or None, "format": new_format, "source": "manual",
-                })
-                st.rerun()
+                ok, resolved_expr, resolved_filter, corrections, err = validate_custom_kpi(
+                    df, new_expr, new_agg, new_filter or None
+                )
+                if not ok:
+                    st.error(f"Couldn't add '{new_name}': {err}")
+                else:
+                    if corrections:
+                        note = "; ".join(f"'{typed}' matched to '{fixed}'" for typed, fixed in corrections)
+                        st.session_state.kpi_feedback = ("info", f"'{new_name}' added - {note}.")
+                    st.session_state.custom_kpis.append({
+                        "name": new_name, "expr": resolved_expr, "agg": new_agg,
+                        "filter": resolved_filter, "format": new_format, "source": "manual",
+                    })
+                    st.rerun()
 
     st.divider()
     st.subheader("Invoices by month")
