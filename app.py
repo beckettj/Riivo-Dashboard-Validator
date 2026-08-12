@@ -227,6 +227,59 @@ DEFAULT_KPI_DEFS = [
     ("avgTaxInvoice", "Avg Tax invoices/month", "float2"),
 ]
 
+# Human-readable formula behind each default KPI, shown in the info popover
+# next to its card. These describe compute_kpis() in reconcile.py in plain
+# language rather than restating the code - keep in sync if that function's
+# logic changes.
+DEFAULT_KPI_FORMULAS = {
+    "totalInvoices": (
+        "Count of rows where Status Reason != 'Cancelled' AND Created On "
+        "falls within the selected year(s)."
+    ),
+    "paidPct": (
+        "count(Status Reason == 'Paid') / Total Invoices x 100, over the "
+        "same included rows as Total Invoices."
+    ),
+    "totalBilled": "Sum of 'Total incl. VAT' across included rows.",
+    "totalBilledExVat": (
+        "Sum of 'Subtotal' across included rows (falls back to Total "
+        "Billed (incl VAT) if Subtotal isn't usable for this export)."
+    ),
+    "totalReceived": "Sum of 'Payment Received' across included rows.",
+    "totalReceivedExVat": (
+        "Total Received (incl VAT) x (Total Billed ex VAT / Total Billed "
+        "incl VAT) - an estimate using the overall billed VAT ratio, since "
+        "Payment Received isn't itself split into VAT/ex-VAT."
+    ),
+    "avgInvoice": "Total Billed (incl VAT) / Total Invoices.",
+    "avgInvoiceExVat": "Total Billed (ex VAT) / Total Invoices.",
+    "discount": "Sum of 'Discount Amount' across included rows.",
+    "refunds": "Sum of 'SARS Reimbursement' across included rows.",
+    "avgAccInvoice": (
+        "count(Invoice Type == 'Accounting') / months in the selected "
+        "date range (inferred from Created On, capped 1-12)."
+    ),
+    "avgTaxInvoice": (
+        "count(Invoice Type == 'Tax') / months in the selected date range "
+        "(inferred from Created On, capped 1-12)."
+    ),
+}
+
+
+def kpi_metric(label, value_str, formula_text, key):
+    """Renders a metric card with a small (i) info button in the top-right
+    corner. Clicking it opens a popover showing exactly what's behind the
+    number - the plain-language formula for a default KPI, the engineered
+    feature + aggregation for a recommended one, or the literal expression
+    for a custom one - so nobody has to guess or go spelunking in the code."""
+    head_l, head_r = st.columns([6, 1])
+    with head_r:
+        with st.popover("ℹ️", use_container_width=True):
+            st.markdown(f"**{label}**")
+            st.caption("Formula")
+            st.code(formula_text, language=None)
+    st.metric(label, value_str)
+
 
 def recommend_kpis(enriched, computed_names, top_n=5):
     """Scores every successfully-computed engineered feature for how
@@ -396,7 +449,7 @@ with tab_kpi:
             continue
         value = kpis[key]
         with kpi_cols[i % 4]:
-            st.metric(label, fmt_value(value, kind))
+            kpi_metric(label, fmt_value(value, kind), DEFAULT_KPI_FORMULAS.get(key, "-"), key=f"default_{key}")
     st.info(f"Avg. Payment Duration - NOT CHECKABLE: {reconcile.NOT_CHECKABLE['avgPaymentDuration']}")
 
     st.divider()
@@ -415,7 +468,11 @@ with tab_kpi:
         for i, rec in enumerate(recs):
             with rec_cols[i]:
                 display_val = f"{rec['value']:.1f}%" if rec["kind"] == "bool" else f"{rec['value']:,.2f}"
-                st.metric(rec["name"], display_val)
+                feature_desc = engineer_features.FEATURE_REGISTRY.get(rec["name"], {}).get(
+                    "description", "No description available for this engineered feature."
+                )
+                formula_text = f"{rec['agg']} of engineered feature '{rec['name']}':\n{feature_desc}"
+                kpi_metric(rec["name"], display_val, formula_text, key=f"rec_{rec['name']}")
                 st.caption(rec["rationale"])
                 if st.button("Add to dashboard", key=f"add_rec_{rec['name']}"):
                     st.session_state.custom_kpis.append({
@@ -435,10 +492,15 @@ with tab_kpi:
         custom_cols = st.columns(4)
         for i, cfg in enumerate(list(st.session_state.custom_kpis)):
             with custom_cols[i % 4]:
+                formula_text = f"{cfg['agg']} of `{cfg['expr']}`"
+                if cfg.get("filter"):
+                    formula_text += f"\nwhere {cfg['filter']}"
+                if cfg.get("source") == "recommended":
+                    formula_text += "\n\n(added from a Recommended KPI - see the Feature Engineering tab for how this feature is computed)"
                 try:
                     source_df = enriched_all if cfg.get("_enriched_col") else df
                     value = compute_custom_kpi(source_df, cfg["expr"], cfg["agg"], cfg.get("filter"))
-                    st.metric(cfg["name"], fmt_value(value, cfg["format"]))
+                    kpi_metric(cfg["name"], fmt_value(value, cfg["format"]), formula_text, key=f"custom_{i}_{cfg['name']}")
                 except Exception as e:
                     # Only reachable if a *previously valid* KPI stops working
                     # because a new file was uploaded without that column -
