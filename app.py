@@ -1,5 +1,5 @@
 """
-Invoice Tools - Interactive UI
+Dashboard Tools - Interactive UI
 ==============================
 
 A single Streamlit app wrapping the three existing CLI tools (reconcile.py,
@@ -31,7 +31,7 @@ import classify_fields
 import engineer_features
 import reconcile
 
-st.set_page_config(page_title="Invoice Tools", layout="wide")
+st.set_page_config(page_title="Dashboard Tools", layout="wide")
 
 # The (i) info-popover buttons on KPI cards should read as a plain icon, not
 # a bordered button - this strips the default Streamlit button chrome
@@ -346,13 +346,13 @@ def recommend_kpis(enriched, computed_names, top_n=5):
 # Sidebar
 # ---------------------------------------------------------------------------
 
-st.sidebar.title("Invoice Tools")
+st.sidebar.title("Dashboard Tools")
 st.sidebar.caption("Wraps reconcile.py, classify_fields.py and engineer_features.py in one interface.")
 
 uploaded = st.sidebar.file_uploader("Invoice export", type=["xlsx", "xls", "xlsm", "csv"])
 
 if not uploaded:
-    st.title("Invoice Tools")
+    st.title("Dashboard Tools")
     st.write(
         "Upload an invoice export (the same 'My Team's Open Invoices' shape "
         "reconcile.py expects, or any similarly-shaped CRM export) in the "
@@ -425,7 +425,7 @@ if "custom_kpis" not in st.session_state:
 if "kpi_feedback" not in st.session_state:
     st.session_state.kpi_feedback = None
 
-st.title("Invoice Tools")
+st.title("Dashboard Tools")
 st.caption(f"{uploaded.name}" + (f" - sheet '{sheet}'" if sheet else "") + f" - {total_rows} rows, {len(df.columns)} columns")
 
 tab_kpi, tab_anomaly, tab_fields, tab_features = st.tabs(
