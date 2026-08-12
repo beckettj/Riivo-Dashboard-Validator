@@ -33,6 +33,29 @@ import reconcile
 
 st.set_page_config(page_title="Invoice Tools", layout="wide")
 
+# The (i) info-popover buttons on KPI cards should read as a plain icon, not
+# a bordered button - this strips the default Streamlit button chrome
+# (border/background/shadow) from just those buttons, leaving every other
+# button (Add to dashboard, Remove, Add KPI, etc.) untouched.
+st.markdown("""
+<style>
+button[data-testid="stPopoverButton"] {
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+button[data-testid="stPopoverButton"]:hover {
+    background: rgba(10, 42, 74, 0.08) !important;
+    border: none !important;
+}
+button[data-testid="stPopoverButton"]:focus:not(:active) {
+    border: none !important;
+    box-shadow: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 NAVY = "#0A2A4A"
 YELLOW = "#F2E234"
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#4a3aa7"]
